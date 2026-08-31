@@ -260,6 +260,16 @@ class IntersvyazApiClient:
             },
         )
 
+    async def get_device_settings(self, td_token: str, device_id: str, app_id: str) -> dict:
+        """GET v1/user-device/{deviceId}/{appId}/info на td-crm.is74.ru —
+        как СЕРВЕР видит нашу текущую регистрацию (диагностика)."""
+        data = await self._request(
+            "GET",
+            f"{BASE_URL_TD_CRM}/v1/user-device/{device_id}/{app_id}/info",
+            headers={"Authorization": f"Bearer {td_token}"},
+        )
+        return data or {}
+
     # ------------------------------------------------------------------ #
     # Камеры
     # ------------------------------------------------------------------ #

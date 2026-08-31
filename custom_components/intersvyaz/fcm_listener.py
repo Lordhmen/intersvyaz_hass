@@ -1,4 +1,4 @@
-"""FCM-слушатель звонков в домофон.
+"""FCM-слушатель звонков в домофон (библиотека firebase-messaging).
 
 Интерсвязь шлёт push-уведомление о звонке в домофон как FCM data-пуш.
 Обычно такой пуш получает и разбирает установленное Android-приложение —
@@ -7,31 +7,46 @@
 (intersvyazlk) и слушает те же самые пуши без какого-либо реального
 телефона.
 
-Регистрация происходит СРАЗУ в двух независимых списках на бэкенде:
+ВНИМАНИЕ ПРО ВЫБОР БИБЛИОТЕКИ: пробовали переключиться на pullkin (более
+современная, async-native альтернатива) — технически она даёт нормальное
+супервизирование задачи, но выяснилось, что её процесс регистрации у
+Google (gcm_check_in) выдаёт себя за Chrome OS/браузер (chrome_build,
+DeviceType.DEVICE_CHROME_OS), а не за Android-устройство — и в итоге НИ
+РАЗУ не получила ни одного сообщения за много часов тестирования, даже
+несмотря на полностью стабильное, правильно залогиненное соединение.
+firebase-messaging, при всех её проблемах со стабильностью соединения,
+РЕАЛЬНО получает пуши — поэтому вернулись на неё, перенеся сюда все уроки,
+полученные при работе над pullkin (супервизирование, умная перерегистрация
+на бэкенде, диагностика).
+
+Известный баг firebase-messaging: после определённых типов разрыва
+соединения (Google сбрасывает MCS-сокет) внутренняя обработка ошибок
+библиотеки иногда зависает и не восстанавливается сама, см.
+https://github.com/bvis/fermax-blue-hass/issues/12 — тот же баг в очень
+похожем проекте. У библиотеки нет доступа снаружи к её внутренней задаче-
+слушателю (в отличие от pullkin), поэтому вместо прямого супервизирования
+задачи используется ВРЕМЕННОЙ супервизор — плановое обновление раз в
+WATCHDOG_TIMEOUT, независимо от того, есть трафик или нет (в реальном
+использовании нет гарантированного "фонового пульса", на который можно
+было бы полагаться как на индикатор жизни).
+
+Регистрация происходит в двух независимых списках на бэкенде Интерсвязи
+(подтверждено практикой):
   1. api.is74.ru/mobile/pushtoken/add-with-device-id — общий список
   2. td-crm.is74.ru/user-device — отдельный бэкенд именно для звонков
      (нужна отдельная авторизация через auth-lk, buyerId всегда 1)
 
-Классификация пушей: у "обычных" уведомлений (новости, статусы заявок и
-т.п.) в payload есть непустое поле "data" с title/text/type. У звонка в
-домофон data пустая/отсутствует — "голый конверт". ВНИМАНИЕ: тот же самый
-голый вид имеет и фоновый keep-alive FCM, никак не связанный со звонками —
-надёжного способа отличить их по содержимому пока не найдено, 
-поэтому сейчас каждый "голый" пуш трактуется как предполагаемый
-звонок, вкл. вероятность ложных срабатываний на фоновый шум.
-
-Firebase-конфиг проекта (project_id/app_id/api_key/sender_id) — публичные
-идентификаторы, зашитые в открытом виде в APK (Google Firebase не считает
-их секретом — секретность обеспечивается на уровне бэкенда через Bearer-
-токен аккаунта, который выдаётся только после SMS-подтверждения). Тем не
-менее весь этот модуль построен на реверс-инжиниринге непубличного
-протокола и ничем не гарантирован Интерсвязью — при изменении схемы на их
-стороне слушатель может перестать работать.
+Классификация пушей: у "обычных" уведомлений в payload есть непустое поле
+"data" с title/text/type. У предполагаемого звонка data пустая/отсутствует
+— то же самое верно и для фонового keep-alive FCM, надёжного способа
+отличить их по содержимому не найдено (см. историю чата).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -51,12 +66,19 @@ FCM_APP_ID = "1:361180765175:android:9c0fafffa6c60062"
 FCM_API_KEY = "AIzaSyCWGN-JHGm50OpAo3-2gR7l1kCQIEs7YO4"
 FCM_SENDER_ID = "361180765175"
 
-# appId для td-crm — это package name приложения, НЕ Firebase app_id
-# (подтверждено перехватом реального трафика официального приложения).
 TD_APP_ID = "com.intersvyaz.lk"
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}_fcm_credentials"
+
+# Плановое обновление соединения — не индикатор смерти (такого надёжного
+# индикатора у нас для firebase-messaging нет), а просто бережная страховка
+# на случай, если соединение тихо умерло, а библиотека сама не заметила.
+WATCHDOG_CHECK_INTERVAL = 120  # сек (2 минуты) — как часто проверяем
+WATCHDOG_TIMEOUT = 15 * 60  # сек (15 минут)
+BACKEND_REREGISTER_MAX_AGE = 6 * 60 * 60  # сек (6 часов) — подстраховка:
+# принудительно подтверждаем регистрацию на бэкенде, даже если токен не
+# менялся — на случай серверной причины, не связанной со сменой токена.
 
 
 class FcmCallListener:
@@ -79,11 +101,10 @@ class FcmCallListener:
         self._unique_device_id: str | None = None
         self.fcm_token: str | None = None
 
-        # Колбэк на предполагаемый звонок — привязывается снаружи (см.
-        # sensor.py), чтобы включить/выключить индикатор "Звонок" на
-        # странице интеграции. Не обязателен: событие EVENT_INCOMING_CALL
-        # летит в шину HA в любом случае, для тех, кто хочет строить
-        # автоматизации напрямую.
+        self._watchdog_task: asyncio.Task | None = None
+        self._last_backend_register_at: float = 0.0
+        self._last_connect_at: float = 0.0
+
         self.on_call_detected: Callable[[], None] | None = None
 
         suffix = entry_id.lower()
@@ -101,16 +122,36 @@ class FcmCallListener:
     # Запуск: FCM-соединение + регистрация в обоих списках на бэкенде
     # ------------------------------------------------------------------ #
     async def async_start(self) -> None:
-        from firebase_messaging import FcmPushClient, FcmRegisterConfig
-
         self._set_status("подключение")
 
         stored = await self._store.async_load() or {}
-        fcm_creds = stored.get("fcm_credentials")
-        cached_td_token = stored.get("td_token")
         self._unique_device_id = stored.get("unique_device_id")
         if not self._unique_device_id:
             self._unique_device_id = uuid_lib.uuid4().hex
+        await self._save_store(unique_device_id=self._unique_device_id)
+
+        fcm_token = await self._connect_fcm()
+        if not fcm_token:
+            return  # _connect_fcm уже выставил статус ошибки
+
+        await self._register_with_backend(fcm_token)
+
+        # async_create_background_task (НЕ async_create_task) — задача
+        # крутится бесконечно, и HA не должна ждать её завершения при
+        # старте/остановке (иначе bootstrap виснет на старте).
+        self._watchdog_task = self._hass.async_create_background_task(
+            self._watchdog_loop(), name="intersvyaz_fcm_watchdog"
+        )
+        self._set_status("слушает", unique_device_id=self._unique_device_id)
+
+    async def _connect_fcm(self) -> str | None:
+        """Создаёт (или пересоздаёт при переподключении) FcmPushClient,
+        делает checkin_or_register и start(). Возвращает fcm_token или
+        None при ошибке (тогда статус уже выставлен)."""
+        from firebase_messaging import FcmPushClient, FcmRegisterConfig
+
+        stored = await self._store.async_load() or {}
+        fcm_creds = stored.get("fcm_credentials")
 
         fcm_config = FcmRegisterConfig(FCM_PROJECT_ID, FCM_APP_ID, FCM_API_KEY, FCM_SENDER_ID)
 
@@ -130,12 +171,32 @@ class FcmCallListener:
             _on_credentials_updated,
         )
 
-        fcm_token = await self._fcm_client.checkin_or_register()
-        self.fcm_token = fcm_token
-        _LOGGER.debug("Получен FCM-токен виртуального устройства (%s...)", fcm_token[:12])
-        self._set_status("токен получен, регистрация на бэкенде")
+        try:
+            fcm_token = await self._fcm_client.checkin_or_register()
+            await self._fcm_client.start()
+        except Exception as err:  # noqa: BLE001 — переподключение не должно падать молча
+            _LOGGER.exception("Не удалось подключиться к FCM")
+            self._set_status("ошибка подключения к FCM", error=str(err))
+            return None
 
-        # Список 1: api.is74.ru (общий push-список)
+        self.fcm_token = fcm_token
+        self._last_connect_at = time.monotonic()
+        _LOGGER.debug("Получен FCM-токен виртуального устройства (%s...)", fcm_token[:12])
+        return fcm_token
+
+    async def _register_with_backend(self, fcm_token: str) -> None:
+        """Регистрирует (или ПЕРЕрегистрирует) fcm_token в обоих списках
+        на бэкенде Интерсвязи. Вызывается при первом запуске и при
+        переподключении, если токен реально изменился ИЛИ давно не
+        подтверждался (BACKEND_REREGISTER_MAX_AGE) — не на каждый мелкий
+        реконнект, чтобы не выглядеть подозрительно частым для их бэкенда
+        (настоящее приложение тоже так не делает)."""
+        self._set_status("токен получен, регистрация на бэкенде")
+        self._last_backend_register_at = time.monotonic()
+
+        stored = await self._store.async_load() or {}
+        cached_td_token = stored.get("td_token")
+
         try:
             await self._client.register_push_token(
                 fcm_token=fcm_token,
@@ -144,9 +205,7 @@ class FcmCallListener:
             )
         except IntersvyazApiError as err:
             _LOGGER.error("Регистрация в api.is74.ru не удалась: %s", err)
-            # Не фатально — пробуем и второй список тоже.
 
-        # Список 2: td-crm.is74.ru (нужен отдельный td-токен)
         td_token: str | None = None
         if cached_td_token and await self._client.check_td_token(cached_td_token):
             _LOGGER.info("Переиспользую живой td-токен из кеша (без новой сессии auth-lk)")
@@ -159,33 +218,74 @@ class FcmCallListener:
                 _LOGGER.error("auth-lk не удался: %s", err)
                 self._set_status("ошибка auth-lk", error=str(err))
 
-        if td_token:
-            await self._save_store(td_token=td_token)
-            try:
-                await self._client.register_td_device(
-                    td_token,
-                    app_id=TD_APP_ID,
-                    push_token=fcm_token,
-                    platform="android",
-                    device_name="Home Assistant",
-                    device_id=self._unique_device_id,
-                    sending_push=True,
-                    notification_type="push",
-                )
-                _LOGGER.info("Устройство зарегистрировано в td-crm (user-device)")
-            except IntersvyazApiError as err:
-                _LOGGER.error("user-device не удался: %s", err)
-                self._set_status("ошибка user-device", error=str(err))
-                return
+        if not td_token:
+            return
 
-        await self._save_store(unique_device_id=self._unique_device_id)
-        await self._fcm_client.start()
-        self._set_status("слушает", unique_device_id=self._unique_device_id)
+        await self._save_store(td_token=td_token)
+        try:
+            await self._client.register_td_device(
+                td_token,
+                app_id=TD_APP_ID,
+                push_token=fcm_token,
+                platform="android",
+                device_name="Home Assistant",
+                device_id=self._unique_device_id,
+                sending_push=True,
+                notification_type="push",
+            )
+            _LOGGER.info("Устройство зарегистрировано в td-crm (user-device)")
+        except IntersvyazApiError as err:
+            _LOGGER.error("user-device не удался: %s", err)
+            self._set_status("ошибка user-device", error=str(err))
+            return
+
+        # Диагностика: спрашиваем у сервера, как ОН видит нашу регистрацию.
+        settings_entity_id = f"sensor.intersvyaz_device_settings_{self._entry_id.lower()}"
+        try:
+            settings = await self._client.get_device_settings(td_token, self._unique_device_id, TD_APP_ID)
+            device_info = settings.get("device_info", {}) if isinstance(settings, dict) else {}
+            notification_type = device_info.get("notificationType") or device_info.get("NOTIFICATION_TYPE")
+            self._hass.states.async_set(
+                settings_entity_id,
+                notification_type or "неизвестно",
+                {"friendly_name": "Интерсвязь — статус устройства (глазами сервера)", **device_info},
+            )
+        except IntersvyazApiError as err:
+            _LOGGER.error("get_device_settings не удался: %s", err)
 
     async def _save_store(self, **updates: Any) -> None:
         current = await self._store.async_load() or {}
         current.update(updates)
         await self._store.async_save(current)
+
+    # ------------------------------------------------------------------ #
+    # Временной супервизор (плановое обновление, не индикатор смерти)
+    # ------------------------------------------------------------------ #
+    async def _watchdog_loop(self) -> None:
+        while True:
+            await asyncio.sleep(WATCHDOG_CHECK_INTERVAL)
+            age = time.monotonic() - self._last_connect_at
+            if age <= WATCHDOG_TIMEOUT:
+                continue
+
+            _LOGGER.info("FCM: плановое обновление соединения (%.0f сек с последнего подключения)", age)
+            self._set_status("плановое переподключение")
+
+            if self._fcm_client is not None:
+                try:
+                    await self._fcm_client.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+            previous_token = self.fcm_token
+            fcm_token = await self._connect_fcm()
+            if fcm_token:
+                if (
+                    fcm_token != previous_token
+                    or time.monotonic() - self._last_backend_register_at > BACKEND_REREGISTER_MAX_AGE
+                ):
+                    await self._register_with_backend(fcm_token)
+                self._set_status("слушает (переподключились)", unique_device_id=self._unique_device_id)
 
     # ------------------------------------------------------------------ #
     # Разбор входящих пушей
@@ -224,8 +324,6 @@ class FcmCallListener:
             has_data, obj, notification,
         )
 
-        # "Голый конверт" (нет data) -> предполагаемый звонок. Есть data ->
-        # обычное уведомление (новость, статус заявки и т.п.).
         assumed_call = not has_data
 
         self._hass.states.async_set(
@@ -253,6 +351,8 @@ class FcmCallListener:
                 self.on_call_detected()
 
     async def async_stop(self) -> None:
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
         if self._fcm_client is not None:
             await self._fcm_client.stop()
         self._set_status("остановлен")
