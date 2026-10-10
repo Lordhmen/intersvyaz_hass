@@ -1,13 +1,13 @@
 {
   "domain": "intersvyaz",
   "name": "Интерсвязь домофон",
-  "codeowners": ["@hoolea"],
+  "codeowners": ["@Lordhmen"],
   "config_flow": true,
   "dependencies": ["network"],
-  "documentation": "https://github.com/hoolea/intersvyaz_hass",
+  "documentation": "https://github.com/Lordhmen/intersvyaz_hass",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/hoolea/intersvyaz_hass/issues",
+  "issue_tracker": "https://github.com/Lordhmen/intersvyaz_hass/issues",
   "requirements": ["firebase-messaging>=0.4.0"],
-  "version": "1.2.1"
+  "version": "1.3.0"
 }
