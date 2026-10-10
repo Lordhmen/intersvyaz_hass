@@ -150,6 +150,10 @@ class FcmCallListener:
         None при ошибке (тогда статус уже выставлен)."""
         from firebase_messaging import FcmPushClient, FcmRegisterConfig
 
+        from . import fcm_patch
+
+        fcm_patch.apply()
+
         stored = await self._store.async_load() or {}
         fcm_creds = stored.get("fcm_credentials")
 
