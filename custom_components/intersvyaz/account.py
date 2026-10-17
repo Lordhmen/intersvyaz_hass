@@ -22,7 +22,7 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 ACCOUNT_UPDATE_INTERVAL = timedelta(hours=1)
-HISTORY_DAYS = 120  # за сколько дней искать последний платёж
+HISTORY_MONTHS = 4  # сколько месяцев назад искать последний платёж
 
 
 class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
@@ -80,14 +80,10 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
         """Статус сети, аварии и история платежей. Ошибка любого из этих
         запросов не ломает баланс и договор — соответствующий сенсор просто
         станет недоступен."""
-        today = dt_util.now().date()
-        begin = (today - timedelta(days=HISTORY_DAYS)).isoformat()
         results = await asyncio.gather(
             self.client.get_service_status(self._user_id, self._profile_id),
             self.client.get_incidents(self._user_id, self._profile_id),
-            self.client.get_balance_history(
-                self._user_id, self._profile_id, begin, today.isoformat()
-            ),
+            self._async_history(),
             return_exceptions=True,
         )
         out = []
@@ -100,3 +96,38 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
             else:
                 out.append(result)
         return tuple(out)
+
+    async def _async_history(self) -> dict:
+        """API отдаёт историю только за календарный месяц beginDate
+        (endDate игнорирует), поэтому идём по месяцам назад, пока не
+        найдём поступление.
+
+        Результат: {"current_month": <история текущего месяца>,
+                    "last_income": <последний платёж> | None}
+        """
+        month_start = dt_util.now().date().replace(day=1)
+        current_month: dict | None = None
+        last_income: dict | None = None
+        for _ in range(HISTORY_MONTHS):
+            history = await self.client.get_balance_history(
+                self._user_id, self._profile_id, month_start.isoformat(), month_start.isoformat()
+            )
+            if current_month is None:
+                current_month = history
+            incomes = [i for i in history.get("detail_income") or [] if isinstance(i, dict)]
+            if incomes:
+                last_income = incomes[-1] if len(incomes) == 1 else max(
+                    incomes, key=lambda i: _date_key(i.get("charge_date"))
+                )
+                break
+            month_start = (month_start - timedelta(days=1)).replace(day=1)
+        return {"current_month": current_month or {}, "last_income": last_income}
+
+
+def _date_key(value) -> tuple:
+    """'16.10.2026' -> (2026, 10, 16) для сортировки."""
+    try:
+        day, month, year = str(value).split(" ")[0].split(".")
+        return (int(year), int(month), int(day))
+    except (ValueError, AttributeError):
+        return (0, 0, 0)

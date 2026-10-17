@@ -377,7 +377,7 @@ def _parse_ru_date(value: Any) -> datetime | None:
 
 
 class IntersvyazLastPaymentSensor(_AccountSensor):
-    """Последнее поступление на счёт (за последние ~4 месяца)."""
+    """Последнее поступление на счёт (ищется до 4 месяцев назад)."""
 
     _attr_name = "Последний платёж"
     _attr_icon = "mdi:cash-check"
@@ -389,12 +389,9 @@ class IntersvyazLastPaymentSensor(_AccountSensor):
         history = (self.coordinator.data or {}).get("history")
         return history if isinstance(history, dict) else None
 
-    def _last(self) -> dict | None:
-        history = self._history() or {}
-        incomes = [i for i in history.get("detail_income") or [] if isinstance(i, dict)]
-        if not incomes:
-            return None
-        return max(incomes, key=lambda i: _parse_ru_date(i.get("charge_date")) or datetime.min)
+    def _last(self) -> dict:
+        last = (self._history() or {}).get("last_income")
+        return last if isinstance(last, dict) else {}
 
     @property
     def available(self) -> bool:
@@ -407,13 +404,13 @@ class IntersvyazLastPaymentSensor(_AccountSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        last = self._last() or {}
-        history = self._history() or {}
+        last = self._last()
+        month = (self._history() or {}).get("current_month") or {}
         parsed = _parse_ru_date(last.get("charge_date"))
         return {
             "date": parsed.date().isoformat() if parsed else last.get("charge_date"),
             "description": last.get("descr"),
             "receipt_url": last.get("receipt_url"),
-            "period_income": _as_float(history.get("total_income")),
-            "period_spend": _as_float(history.get("total_spend")),
+            "month_income": _as_float(month.get("total_income")),
+            "month_spend": _as_float(month.get("total_spend")),
         }
