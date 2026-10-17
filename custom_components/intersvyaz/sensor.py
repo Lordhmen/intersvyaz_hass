@@ -219,13 +219,19 @@ class IntersvyazFullNameSensor(_AccountSensor):
 
     @property
     def native_value(self) -> str | None:
+        # Полное ФИО приходит в profileName; FULL_NAME/shortFio у
+        # Интерсвязи бывают сокращёнными (одно слово).
         user = self._payload("user")
-        return _text(user.get("FULL_NAME")) or _text(user.get("shortFio"))
+        return (
+            _text(user.get("profileName"))
+            or _text(user.get("FULL_NAME"))
+            or _text(user.get("shortFio"))
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         user = self._payload("user")
-        return {"short": _text(user.get("shortFio")), "profile_name": _text(user.get("profileName"))}
+        return {"short": _text(user.get("shortFio")) or _text(user.get("FULL_NAME"))}
 
 
 class IntersvyazLoginSensor(_AccountSensor):
