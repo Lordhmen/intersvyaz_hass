@@ -53,6 +53,9 @@ async def async_setup_entry(
             IntersvyazBalanceSensor(account_coordinator, account, f"balance_{base}")
         )
         entities.append(
+            IntersvyazPaymentDueSensor(account_coordinator, account, f"payment_due_{base}")
+        )
+        entities.append(
             IntersvyazContractSensor(account_coordinator, account, f"contract_{base}")
         )
         entities.append(
@@ -90,8 +93,18 @@ class _AccountSensor(CoordinatorEntity, SensorEntity):
         return value if isinstance(value, dict) else {}
 
 
+def _monthly_fee(data: dict) -> float | None:
+    services = data.get("services")
+    if not isinstance(services, list):
+        return None
+    fees = [_as_float(item.get("MONTH_PAY")) for item in services if isinstance(item, dict)]
+    fees = [fee for fee in fees if fee is not None]
+    return round(sum(fees), 2) if fees else None
+
+
 class IntersvyazBalanceSensor(_AccountSensor):
-    """Баланс договора в рублях + сведения о следующем платеже."""
+    """«Ваш баланс», как в приложении Интерсвязи: деньги на счёте минус
+    абонентская плата за следующий месяц."""
 
     _attr_name = "Баланс"
     _attr_icon = "mdi:cash"
@@ -101,22 +114,58 @@ class IntersvyazBalanceSensor(_AccountSensor):
 
     @property
     def native_value(self) -> float | None:
-        return _as_float(self._payload("balance").get("balance"))
+        on_account = _as_float(self._payload("balance").get("balance"))
+        fee = _monthly_fee(self.coordinator.data or {})
+        if on_account is None:
+            return None
+        return round(on_account - (fee or 0), 2)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         balance = self._payload("balance")
-        next_payment = balance.get("nextPayment")
-        next_payment = next_payment if isinstance(next_payment, dict) else {}
         blocked = balance.get("blocked")
         blocked = blocked if isinstance(blocked, dict) else {}
         return {
-            "next_payment": _as_float(next_payment.get("pay")),
-            "next_payment_text": next_payment.get("text"),
+            "on_account": _as_float(balance.get("balance")),
+            "monthly_fee": _monthly_fee(self.coordinator.data or {}),
             "debt": _as_float(balance.get("debt")),
             "blocked": bool(blocked),
             "blocked_text": blocked.get("text"),
             "date_delay_lock": balance.get("dateDelayLock"),
+        }
+
+
+class IntersvyazPaymentDueSensor(_AccountSensor):
+    """«К оплате»: абонентская плата за месяц и срок («Оплатите до …»)."""
+
+    _attr_name = "К оплате"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "RUB"
+    _attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self) -> float | None:
+        return _monthly_fee(self.coordinator.data or {})
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        next_payment = self._payload("balance").get("nextPayment")
+        next_payment = next_payment if isinstance(next_payment, dict) else {}
+        services = (self.coordinator.data or {}).get("services")
+        services = services if isinstance(services, list) else []
+        return {
+            "due_text": next_payment.get("text"),
+            "services": [
+                {
+                    "name": (item.get("tariff") or {}).get("NAME") or item.get("NAME"),
+                    "type": item.get("TYPE"),
+                    "month_pay": _as_float(item.get("MONTH_PAY")),
+                    "connected": item.get("CONNECT_DATE"),
+                }
+                for item in services
+                if isinstance(item, dict)
+            ],
         }
 
 

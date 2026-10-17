@@ -184,6 +184,21 @@ class IntersvyazApiClient:
             raise IntersvyazApiError("API не вернул баланс")
         return data
 
+    async def get_services(
+        self, user_id: int | str | None, profile_id: int | str | None
+    ) -> list[dict]:
+        """Подключённые услуги с абонентской платой (MONTH_PAY) — из них
+        приложение считает «К оплате» и «Ваш баланс»."""
+        headers = {"Accept": "application/json; version=v2"}
+        if user_id is not None:
+            headers["X-Api-User-Id"] = str(user_id)
+        if profile_id is not None:
+            headers["X-api-profile-id"] = str(profile_id)
+        data = await self._request("GET", f"{BASE_URL}/user/service", auth=True, headers=headers)
+        if not isinstance(data, list):
+            raise IntersvyazApiError("API не вернул список услуг")
+        return [item for item in data if isinstance(item, dict)]
+
     # ------------------------------------------------------------------ #
     # Домофон / реле
     # ------------------------------------------------------------------ #
