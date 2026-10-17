@@ -199,6 +199,59 @@ class IntersvyazApiClient:
             raise IntersvyazApiError("API не вернул список услуг")
         return [item for item in data if isinstance(item, dict)]
 
+    def _profile_headers(
+        self, user_id: int | str | None, profile_id: int | str | None
+    ) -> dict[str, str]:
+        headers = {"Accept": "application/json; version=v2"}
+        if user_id is not None:
+            headers["X-Api-User-Id"] = str(user_id)
+        if profile_id is not None:
+            headers["X-api-profile-id"] = str(profile_id)
+        return headers
+
+    async def get_service_status(
+        self, user_id: int | str | None, profile_id: int | str | None
+    ) -> dict:
+        """Статус сети по адресу («Всё отлично» и т.п.)."""
+        data = await self._request(
+            "GET", f"{BASE_URL}/user/service/status", auth=True,
+            headers=self._profile_headers(user_id, profile_id),
+        )
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул статус сети")
+        return data
+
+    async def get_incidents(
+        self, user_id: int | str | None, profile_id: int | str | None
+    ) -> list:
+        """Аварии и плановые работы по адресу."""
+        data = await self._request(
+            "GET", f"{BASE_URL}/user/incident", auth=True,
+            headers=self._profile_headers(user_id, profile_id),
+        )
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise IntersvyazApiError("API не вернул список аварий")
+        return data
+
+    async def get_balance_history(
+        self,
+        user_id: int | str | None,
+        profile_id: int | str | None,
+        begin_date: str,
+        end_date: str,
+    ) -> dict:
+        """Списания и платежи за период (даты в формате ГГГГ-ММ-ДД)."""
+        data = await self._request(
+            "GET", f"{BASE_URL}/user/balance/history", auth=True,
+            headers=self._profile_headers(user_id, profile_id),
+            params={"beginDate": begin_date, "endDate": end_date},
+        )
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул историю баланса")
+        return data
+
     # ------------------------------------------------------------------ #
     # Домофон / реле
     # ------------------------------------------------------------------ #

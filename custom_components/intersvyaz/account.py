@@ -11,6 +11,8 @@ import asyncio
 import logging
 from datetime import timedelta
 
+from homeassistant.util import dt as dt_util
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -20,10 +22,13 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 ACCOUNT_UPDATE_INTERVAL = timedelta(hours=1)
+HISTORY_DAYS = 120  # за сколько дней искать последний платёж
 
 
 class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
-    """self.data = {"user": {...}, "balance": {...}, "services": [...], "phone": ...}"""
+    """self.data = {"user", "balance", "services", "phone",
+    "status", "incidents", "history"} — последние три необязательные
+    (None, если запрос не удался)."""
 
     def __init__(self, hass: HomeAssistant, client: IntersvyazApiClient, label: str) -> None:
         self.client = client
@@ -49,6 +54,7 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
                 self.client.get_balance(self._user_id, self._profile_id),
                 self.client.get_services(self._user_id, self._profile_id),
             )
+            status, incidents, history = await self._async_optional()
         except IntersvyazAuthError as err:
             # Не запускаем повторную авторизацию отсюда: если токен и правда
             # истёк, это сделает основной координатор камер. А 401/403 на
@@ -60,4 +66,37 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
             # Профиль мог смениться — перечитаем идентификаторы в следующий раз.
             self._user_id = self._profile_id = None
             raise UpdateFailed(str(err)) from err
-        return {"user": user, "balance": balance, "services": services, "phone": self._phone}
+        return {
+            "user": user,
+            "balance": balance,
+            "services": services,
+            "phone": self._phone,
+            "status": status,
+            "incidents": incidents,
+            "history": history,
+        }
+
+    async def _async_optional(self) -> tuple:
+        """Статус сети, аварии и история платежей. Ошибка любого из этих
+        запросов не ломает баланс и договор — соответствующий сенсор просто
+        станет недоступен."""
+        today = dt_util.now().date()
+        begin = (today - timedelta(days=HISTORY_DAYS)).isoformat()
+        results = await asyncio.gather(
+            self.client.get_service_status(self._user_id, self._profile_id),
+            self.client.get_incidents(self._user_id, self._profile_id),
+            self.client.get_balance_history(
+                self._user_id, self._profile_id, begin, today.isoformat()
+            ),
+            return_exceptions=True,
+        )
+        out = []
+        for name, result in zip(("статус сети", "аварии", "история платежей"), results):
+            if isinstance(result, IntersvyazAuthError):
+                raise result
+            if isinstance(result, Exception):
+                _LOGGER.debug("Не удалось получить %s: %s", name, result)
+                out.append(None)
+            else:
+                out.append(result)
+        return tuple(out)

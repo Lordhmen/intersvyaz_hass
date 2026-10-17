@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
@@ -57,6 +58,15 @@ async def async_setup_entry(
         )
         entities.append(
             IntersvyazContractSensor(account_coordinator, account, f"contract_{base}")
+        )
+        entities.append(
+            IntersvyazNetworkStatusSensor(account_coordinator, account, f"network_status_{base}")
+        )
+        entities.append(
+            IntersvyazIncidentsSensor(account_coordinator, account, f"incidents_{base}")
+        )
+        entities.append(
+            IntersvyazLastPaymentSensor(account_coordinator, account, f"last_payment_{base}")
         )
         entities.append(
             IntersvyazFullNameSensor(account_coordinator, account, f"full_name_{base}")
@@ -310,3 +320,100 @@ class IntersvyazPhoneSensor(_AccountSensor):
         elif len(digits) == 11 and digits[0] == "8":
             digits = "7" + digits[1:]
         return f"+{digits}"
+
+
+class IntersvyazNetworkStatusSensor(_AccountSensor):
+    """Статус сети по адресу, как на карточке договора в приложении."""
+
+    _attr_name = "Статус сети"
+    _attr_icon = "mdi:lan-check"
+
+    @property
+    def available(self) -> bool:
+        return super().available and isinstance((self.coordinator.data or {}).get("status"), dict)
+
+    @property
+    def native_value(self) -> str | None:
+        return _text(self._payload("status").get("title"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self._payload("status")
+        return {"status": status.get("status"), "description": _text(status.get("description"))}
+
+
+class IntersvyazIncidentsSensor(_AccountSensor):
+    """Количество текущих аварий и плановых работ по адресу."""
+
+    _attr_name = "Аварии"
+    _attr_icon = "mdi:alert-octagon-outline"
+    _attr_native_unit_of_measurement = "шт."
+
+    def _items(self) -> list | None:
+        items = (self.coordinator.data or {}).get("incidents")
+        return items if isinstance(items, list) else None
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._items() is not None
+
+    @property
+    def native_value(self) -> int | None:
+        items = self._items()
+        return len(items) if items is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"incidents": (self._items() or [])[:10]}
+
+
+def _parse_ru_date(value: Any) -> datetime | None:
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(str(value), fmt)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+class IntersvyazLastPaymentSensor(_AccountSensor):
+    """Последнее поступление на счёт (за последние ~4 месяца)."""
+
+    _attr_name = "Последний платёж"
+    _attr_icon = "mdi:cash-check"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "RUB"
+    _attr_suggested_display_precision = 2
+
+    def _history(self) -> dict | None:
+        history = (self.coordinator.data or {}).get("history")
+        return history if isinstance(history, dict) else None
+
+    def _last(self) -> dict | None:
+        history = self._history() or {}
+        incomes = [i for i in history.get("detail_income") or [] if isinstance(i, dict)]
+        if not incomes:
+            return None
+        return max(incomes, key=lambda i: _parse_ru_date(i.get("charge_date")) or datetime.min)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._history() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        last = self._last()
+        return _as_float(str(last.get("pay_value")).lstrip("+")) if last else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        last = self._last() or {}
+        history = self._history() or {}
+        parsed = _parse_ru_date(last.get("charge_date"))
+        return {
+            "date": parsed.date().isoformat() if parsed else last.get("charge_date"),
+            "description": last.get("descr"),
+            "receipt_url": last.get("receipt_url"),
+            "period_income": _as_float(history.get("total_income")),
+            "period_spend": _as_float(history.get("total_spend")),
+        }
