@@ -40,6 +40,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+from .account import IntersvyazAccountCoordinator
 from .fcm_listener import FcmCallListener
 
 _LOGGER = logging.getLogger(__name__)
@@ -239,6 +240,9 @@ def _build_accounts(
                 {
                     "client": client,
                     "coordinator": coordinator,
+                    "account_coordinator": IntersvyazAccountCoordinator(
+                        hass, client, f"{entry.entry_id}_{user_id}"
+                    ),
                     "address": addr.get(CONF_ADDRESS) or entry.title,
                     "user_id": user_id,
                     "device_identifier": (DOMAIN, entry.entry_id)
@@ -256,6 +260,9 @@ def _build_accounts(
                 {
                     "client": client,
                     "coordinator": coordinator,
+                    "account_coordinator": IntersvyazAccountCoordinator(
+                        hass, client, entry.entry_id
+                    ),
                     "address": entry.title,
                     "user_id": None,
                     "device_identifier": (DOMAIN, entry.entry_id),
@@ -283,6 +290,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise
         except UpdateFailed as err:
             raise ConfigEntryNotReady(str(err)) from err
+        # Баланс и договор — необязательные данные: ошибка не мешает старту,
+        # сенсоры будут недоступны до следующей удачной попытки.
+        await account["account_coordinator"].async_refresh()
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {"accounts": accounts}

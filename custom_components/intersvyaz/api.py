@@ -145,6 +145,46 @@ class IntersvyazApiClient:
         return token
 
     # ------------------------------------------------------------------ #
+    # Договор: профиль и баланс
+    # (эндпоинты подсмотрены в zxkill/homeassistant-is)
+    # ------------------------------------------------------------------ #
+    async def get_token_info(self) -> dict:
+        """Сведения о текущем токене: USER_ID, PROFILE_ID, срок действия."""
+        data = await self._request(
+            "GET",
+            f"{BASE_URL}/token/info",
+            auth=True,
+            headers={"Accept": "application/json; version=v2"},
+        )
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул сведения о токене")
+        return data
+
+    async def get_user_info(self, user_id: int | str | None) -> dict:
+        """Профиль договора: номер договора, роль, услуги."""
+        headers = {"Accept": "application/json; version=v3"}
+        if user_id is not None:
+            headers["X-Api-User-Id"] = str(user_id)
+        data = await self._request("GET", f"{BASE_URL}/user/user", auth=True, headers=headers)
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул профиль договора")
+        return data
+
+    async def get_balance(
+        self, user_id: int | str | None, profile_id: int | str | None
+    ) -> dict:
+        """Баланс договора и сведения о следующем платеже."""
+        headers = {"Accept": "application/json; version=v2"}
+        if user_id is not None:
+            headers["X-Api-User-Id"] = str(user_id)
+        if profile_id is not None:
+            headers["X-api-profile-id"] = str(profile_id)
+        data = await self._request("GET", f"{BASE_URL}/user/balance", auth=True, headers=headers)
+        if not isinstance(data, dict):
+            raise IntersvyazApiError("API не вернул баланс")
+        return data
+
+    # ------------------------------------------------------------------ #
     # Домофон / реле
     # ------------------------------------------------------------------ #
     async def get_relays(self) -> list[dict]:

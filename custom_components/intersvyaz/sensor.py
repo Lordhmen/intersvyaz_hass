@@ -1,18 +1,21 @@
 """Sensor platform for Intersvyaz Domofon integration.
 
-Единственная сущность здесь — индикатор "Звонок", видимый прямо на
-странице интеграции . Остальная FCM-диагностика (sensor.intersvyaz_fcm_status_*, sensor.intersvyaz_last_push_*)
+Сущности: индикатор "Звонок" (один на запись конфигурации) и данные
+договора — баланс и номер договора (на каждый адрес). Остальная FCM-диагностика (sensor.intersvyaz_fcm_status_*, sensor.intersvyaz_last_push_*)
 пишется напрямую через hass.states.async_set() в fcm_listener.py
 """
 from __future__ import annotations
 
 import logging
 
-from homeassistant.components.sensor import SensorEntity
+from typing import Any
+
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
@@ -39,7 +42,100 @@ async def async_setup_entry(
         primary["address"],
         f"call_indicator_{entry.entry_id}",
     )
-    async_add_entities([entity])
+    entities: list[SensorEntity] = [entity]
+
+    for account in accounts:
+        account_coordinator = account.get("account_coordinator")
+        if account_coordinator is None:
+            continue
+        base = f"{entry.entry_id}{account['unique_suffix']}"
+        entities.append(
+            IntersvyazBalanceSensor(account_coordinator, account, f"balance_{base}")
+        )
+        entities.append(
+            IntersvyazContractSensor(account_coordinator, account, f"contract_{base}")
+        )
+
+    async_add_entities(entities)
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(str(value).replace(",", ".")) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+class _AccountSensor(CoordinatorEntity, SensorEntity):
+    """Сенсор данных договора, привязанный к устройству адреса."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, account: dict, unique_id: str) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = unique_id
+        self._attr_device_info = DeviceInfo(identifiers={account["device_identifier"]})
+
+    def _payload(self, key: str) -> dict:
+        value = (self.coordinator.data or {}).get(key)
+        return value if isinstance(value, dict) else {}
+
+
+class IntersvyazBalanceSensor(_AccountSensor):
+    """Баланс договора в рублях + сведения о следующем платеже."""
+
+    _attr_name = "Баланс"
+    _attr_icon = "mdi:cash"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "RUB"
+    _attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self) -> float | None:
+        return _as_float(self._payload("balance").get("balance"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        balance = self._payload("balance")
+        next_payment = balance.get("nextPayment")
+        next_payment = next_payment if isinstance(next_payment, dict) else {}
+        blocked = balance.get("blocked")
+        blocked = blocked if isinstance(blocked, dict) else {}
+        return {
+            "next_payment": _as_float(next_payment.get("pay")),
+            "next_payment_text": next_payment.get("text"),
+            "debt": _as_float(balance.get("debt")),
+            "blocked": bool(blocked),
+            "blocked_text": blocked.get("text"),
+            "date_delay_lock": balance.get("dateDelayLock"),
+        }
+
+
+class IntersvyazContractSensor(_AccountSensor):
+    """Номер договора и подключённые услуги.
+
+    ФИО, логин и телефон из профиля намеренно не выводятся в атрибуты.
+    """
+
+    _attr_name = "Договор"
+    _attr_icon = "mdi:file-document-outline"
+
+    @property
+    def native_value(self) -> str | None:
+        account_num = self._payload("user").get("ACCOUNT_NUM")
+        return str(account_num) if account_num not in (None, "") else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        user = self._payload("user")
+        firm = user.get("firm")
+        firm = firm if isinstance(firm, dict) else {}
+        return {
+            "services": user.get("uslugaList"),
+            "role": user.get("roleName"),
+            "provider": firm.get("NAME"),
+            "active_since": user.get("ACTIVATE_DATE"),
+        }
 
 
 class IntersvyazCallIndicator(SensorEntity):
