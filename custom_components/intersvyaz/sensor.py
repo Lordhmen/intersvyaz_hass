@@ -55,6 +55,15 @@ async def async_setup_entry(
         entities.append(
             IntersvyazContractSensor(account_coordinator, account, f"contract_{base}")
         )
+        entities.append(
+            IntersvyazFullNameSensor(account_coordinator, account, f"full_name_{base}")
+        )
+        entities.append(
+            IntersvyazLoginSensor(account_coordinator, account, f"login_{base}")
+        )
+        entities.append(
+            IntersvyazPhoneSensor(account_coordinator, account, f"phone_{base}")
+        )
 
     async_add_entities(entities)
 
@@ -112,10 +121,8 @@ class IntersvyazBalanceSensor(_AccountSensor):
 
 
 class IntersvyazContractSensor(_AccountSensor):
-    """Номер договора и подключённые услуги.
-
-    ФИО, логин и телефон из профиля намеренно не выводятся в атрибуты.
-    """
+    """Номер договора и подключённые услуги (ФИО, логин и телефон —
+    отдельными сенсорами ниже)."""
 
     _attr_name = "Договор"
     _attr_icon = "mdi:file-document-outline"
@@ -199,3 +206,52 @@ class IntersvyazCallIndicator(SensorEntity):
         self._attr_native_value = "Нет"
         self._reset_unsub = None
         self.async_write_ha_state()
+
+def _text(value: Any) -> str | None:
+    return str(value).strip() if value not in (None, "") and str(value).strip() else None
+
+
+class IntersvyazFullNameSensor(_AccountSensor):
+    """ФИО владельца договора из профиля."""
+
+    _attr_name = "ФИО"
+    _attr_icon = "mdi:account"
+
+    @property
+    def native_value(self) -> str | None:
+        user = self._payload("user")
+        return _text(user.get("FULL_NAME")) or _text(user.get("shortFio"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        user = self._payload("user")
+        return {"short": _text(user.get("shortFio")), "profile_name": _text(user.get("profileName"))}
+
+
+class IntersvyazLoginSensor(_AccountSensor):
+    """Логин личного кабинета."""
+
+    _attr_name = "Логин"
+    _attr_icon = "mdi:account-key"
+
+    @property
+    def native_value(self) -> str | None:
+        return _text(self._payload("user").get("LOGIN"))
+
+
+class IntersvyazPhoneSensor(_AccountSensor):
+    """Телефон, к которому привязан токен, в формате +7XXXXXXXXXX."""
+
+    _attr_name = "Телефон"
+    _attr_icon = "mdi:phone"
+
+    @property
+    def native_value(self) -> str | None:
+        digits = "".join(ch for ch in str((self.coordinator.data or {}).get("phone") or "") if ch.isdigit())
+        if not digits:
+            return None
+        if len(digits) == 10:
+            digits = "7" + digits
+        elif len(digits) == 11 and digits[0] == "8":
+            digits = "7" + digits[1:]
+        return f"+{digits}"

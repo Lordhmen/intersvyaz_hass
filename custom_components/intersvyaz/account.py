@@ -23,12 +23,13 @@ ACCOUNT_UPDATE_INTERVAL = timedelta(hours=1)
 
 
 class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
-    """self.data = {"user": {...}, "balance": {...}}"""
+    """self.data = {"user": {...}, "balance": {...}, "phone": int | None}"""
 
     def __init__(self, hass: HomeAssistant, client: IntersvyazApiClient, label: str) -> None:
         self.client = client
         self._user_id: int | None = None
         self._profile_id: int | None = None
+        self._phone: int | str | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -42,6 +43,7 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
                 info = await self.client.get_token_info()
                 self._user_id = info.get("USER_ID")
                 self._profile_id = info.get("PROFILE_ID")
+                self._phone = info.get("PHONE")
             user, balance = await asyncio.gather(
                 self.client.get_user_info(self._user_id),
                 self.client.get_balance(self._user_id, self._profile_id),
@@ -57,4 +59,4 @@ class IntersvyazAccountCoordinator(DataUpdateCoordinator[dict]):
             # Профиль мог смениться — перечитаем идентификаторы в следующий раз.
             self._user_id = self._profile_id = None
             raise UpdateFailed(str(err)) from err
-        return {"user": user, "balance": balance}
+        return {"user": user, "balance": balance, "phone": self._phone}
